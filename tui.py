@@ -135,10 +135,13 @@ class ModbusScanApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#results", DataTable)
+        self._add_columns(table)
+        table.cursor_type = "row"
+
+    def _add_columns(self, table: DataTable) -> None:
         table.add_columns(
             "#", "Address (hex)", "Address (dec)", "Count", "FC", "Values", "Status"
         )
-        table.cursor_type = "row"
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-btn":
@@ -156,7 +159,8 @@ class ModbusScanApp(App):
 
     def _clear_results(self) -> None:
         table = self.query_one("#results", DataTable)
-        table.clear()
+        table.clear(columns=True)
+        self._add_columns(table)
         self._row_counter = 0
 
     async def _start_scan(self) -> None:

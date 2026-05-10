@@ -33,13 +33,13 @@ FC_OPTIONS: list[tuple[str, int]] = [
 
 
 def parse_address(s: str) -> int:
-    """Accept 0x-prefixed hex or plain decimal. Raises ValueError on garbage."""
+    """Interpret input as hex. Optional 0x prefix is allowed but never required."""
     s = s.strip()
     if not s:
         raise ValueError("address is empty")
     if s.lower().startswith("0x"):
-        return int(s, 16)
-    return int(s, 10)
+        s = s[2:]
+    return int(s, 16)
 
 
 def format_values(function_code: int, values: list[int]) -> str:
@@ -98,7 +98,7 @@ class ResultDetailScreen(ModalScreen):
         end = r.address + r.count - 1
         lines = [
             f"[bold]Function code:[/bold] 0x{r.function_code:02X}",
-            f"[bold]Address range:[/bold] 0x{r.address:04X} – 0x{end:04X}  ({r.address} – {end})",
+            f"[bold]Address range:[/bold] 0x{r.address:04X} – 0x{end:04X}",
             f"[bold]Count:[/bold] {r.count}",
             f"[bold]Status:[/bold] {r.status}",
         ]
@@ -108,11 +108,9 @@ class ResultDetailScreen(ModalScreen):
         table = self.query_one("#modal-table", DataTable)
         is_bits = self.result.function_code in scanner.BIT_FUNCTIONS
         if is_bits:
-            table.add_columns("Address (hex)", "Address (dec)", "Value")
+            table.add_columns("Address", "Value")
         else:
-            table.add_columns(
-                "Address (hex)", "Address (dec)", "Value (hex)", "Value (dec)"
-            )
+            table.add_columns("Address", "Value (hex)", "Value (dec)")
         table.cursor_type = "row"
 
         if self.result.values is None:
@@ -120,9 +118,9 @@ class ResultDetailScreen(ModalScreen):
         for i, v in enumerate(self.result.values):
             addr = self.result.address + i
             if is_bits:
-                table.add_row(f"0x{addr:04X}", str(addr), str(v))
+                table.add_row(f"0x{addr:04X}", str(v))
             else:
-                table.add_row(f"0x{addr:04X}", str(addr), f"0x{v:04X}", str(v))
+                table.add_row(f"0x{addr:04X}", f"0x{v:04X}", str(v))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "modal-close":
@@ -205,11 +203,11 @@ class ModbusScanApp(App):
                     yield Label("Function code")
                     yield Select(FC_OPTIONS, value=0x03, allow_blank=False, id="fc")
                 with Vertical(classes="field"):
-                    yield Label("Start address (dec or 0x..)")
+                    yield Label("Start address (hex)")
                     yield Input(value="0", id="start")
                 with Vertical(classes="field"):
-                    yield Label("End address (dec or 0x..)")
-                    yield Input(value="31", id="end")
+                    yield Label("End address (hex)")
+                    yield Input(value="1F", id="end")
                 with Vertical(classes="field"):
                     yield Label("Registers per read")
                     yield Input(value="8", id="count")
@@ -229,7 +227,7 @@ class ModbusScanApp(App):
 
     def _add_columns(self, table: DataTable) -> None:
         table.add_columns(
-            "#", "Address (hex)", "Address (dec)", "Count", "FC", "Values", "Status"
+            "#", "Address", "Count", "FC", "Values", "Status"
         )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -297,7 +295,7 @@ class ModbusScanApp(App):
             start = parse_address(self.query_one("#start", Input).value)
             end = parse_address(self.query_one("#end", Input).value)
         except ValueError:
-            raise ValueError("Addresses must be decimal or 0x-prefixed hex") from None
+            raise ValueError("Addresses must be hex (e.g. 1F or 0x1F)") from None
         if start < 0 or end < 0 or start > 0xFFFF or end > 0xFFFF:
             raise ValueError("Addresses must be in 0..0xFFFF")
         if end < start:
@@ -333,7 +331,6 @@ class ModbusScanApp(App):
                 row_key = table.add_row(
                     str(self._row_counter),
                     f"0x{result.address:04X}",
-                    str(result.address),
                     str(result.count),
                     f"0x{result.function_code:02X}",
                     values_text,

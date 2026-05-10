@@ -7,6 +7,7 @@ import asyncio
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     DataTable,
@@ -15,9 +16,12 @@ from textual.widgets import (
     Input,
     Label,
     Select,
+    Static,
 )
+from textual.widgets._data_table import RowKey
 
 import scanner
+from scanner import ScanResult
 
 
 FC_OPTIONS: list[tuple[str, int]] = [
@@ -42,6 +46,90 @@ def format_values(function_code: int, values: list[int]) -> str:
     if function_code in scanner.BIT_FUNCTIONS:
         return " ".join(str(v) for v in values)
     return " ".join(f"0x{v:04X} ({v})" for v in values)
+
+
+class ResultDetailScreen(ModalScreen):
+    """Modal showing the per-register breakdown of one scan row."""
+
+    CSS = """
+    ResultDetailScreen {
+        align: center middle;
+    }
+    #modal-body {
+        width: 80%;
+        height: 80%;
+        max-width: 100;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    #modal-summary {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #modal-table {
+        height: 1fr;
+    }
+    #modal-buttons {
+        height: 3;
+        align: center middle;
+        padding-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def __init__(self, result: ScanResult) -> None:
+        super().__init__()
+        self.result = result
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-body"):
+            yield Static(self._summary(), id="modal-summary")
+            yield DataTable(id="modal-table", zebra_stripes=True)
+            with Horizontal(id="modal-buttons"):
+                yield Button("Close", id="modal-close", variant="primary")
+
+    def _summary(self) -> str:
+        r = self.result
+        end = r.address + r.count - 1
+        lines = [
+            f"[bold]Function code:[/bold] 0x{r.function_code:02X}",
+            f"[bold]Address range:[/bold] 0x{r.address:04X} – 0x{end:04X}  ({r.address} – {end})",
+            f"[bold]Count:[/bold] {r.count}",
+            f"[bold]Status:[/bold] {r.status}",
+        ]
+        return "\n".join(lines)
+
+    def on_mount(self) -> None:
+        table = self.query_one("#modal-table", DataTable)
+        is_bits = self.result.function_code in scanner.BIT_FUNCTIONS
+        if is_bits:
+            table.add_columns("Address (hex)", "Address (dec)", "Value")
+        else:
+            table.add_columns(
+                "Address (hex)", "Address (dec)", "Value (hex)", "Value (dec)"
+            )
+        table.cursor_type = "row"
+
+        if self.result.values is None:
+            return
+        for i, v in enumerate(self.result.values):
+            addr = self.result.address + i
+            if is_bits:
+                table.add_row(f"0x{addr:04X}", str(addr), str(v))
+            else:
+                table.add_row(f"0x{addr:04X}", str(addr), f"0x{v:04X}", str(v))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "modal-close":
+            self.dismiss()
+
+    def action_dismiss(self) -> None:
+        self.dismiss()
 
 
 class ModbusScanApp(App):
@@ -92,6 +180,7 @@ class ModbusScanApp(App):
         super().__init__()
         self._scan_task: asyncio.Task | None = None
         self._row_counter = 0
+        self._results: dict[RowKey, ScanResult] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -162,6 +251,13 @@ class ModbusScanApp(App):
         table.clear(columns=True)
         self._add_columns(table)
         self._row_counter = 0
+        self._results.clear()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        result = self._results.get(event.row_key)
+        if result is None:
+            return
+        self.push_screen(ResultDetailScreen(result))
 
     async def _start_scan(self) -> None:
         if self._scan_task is not None and not self._scan_task.done():
@@ -234,7 +330,7 @@ class ModbusScanApp(App):
                     Text(result.status, style="red")
                     if not result.ok else Text(result.status, style="green")
                 )
-                table.add_row(
+                row_key = table.add_row(
                     str(self._row_counter),
                     f"0x{result.address:04X}",
                     str(result.address),
@@ -243,6 +339,7 @@ class ModbusScanApp(App):
                     values_text,
                     status,
                 )
+                self._results[row_key] = result
         except asyncio.CancelledError:
             self.notify("Scan stopped", severity="warning")
         except Exception as exc:

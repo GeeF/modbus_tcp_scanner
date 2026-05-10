@@ -7,9 +7,11 @@ import asyncio
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Header,
@@ -163,6 +165,9 @@ class ModbusScanApp(App):
     #buttons > Button {
         margin: 0 1;
     }
+    #buttons > Checkbox {
+        margin: 0 1;
+    }
     #results {
         height: 1fr;
     }
@@ -177,7 +182,7 @@ class ModbusScanApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._scan_task: asyncio.Task | None = None
-        self._row_counter = 0
+        self._row_keys: list[RowKey] = []
         self._results: dict[RowKey, ScanResult] = {}
 
     def compose(self) -> ComposeResult:
@@ -216,6 +221,7 @@ class ModbusScanApp(App):
             yield Button("Start scan", id="start-btn", variant="primary")
             yield Button("Stop", id="stop-btn", variant="error", disabled=True)
             yield Button("Clear results", id="clear-btn")
+            yield Checkbox("Continuous", id="continuous")
 
         yield DataTable(id="results", zebra_stripes=True)
         yield Footer()
@@ -248,7 +254,7 @@ class ModbusScanApp(App):
         table = self.query_one("#results", DataTable)
         table.clear(columns=True)
         self._add_columns(table)
-        self._row_counter = 0
+        self._row_keys.clear()
         self._results.clear()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -317,26 +323,19 @@ class ModbusScanApp(App):
         fc: int, start: int, end: int, count: int,
     ) -> None:
         table = self.query_one("#results", DataTable)
+        continuous_cb = self.query_one("#continuous", Checkbox)
         try:
-            async for result in scanner.scan(host, port, unit, fc, start, end, count):
-                self._row_counter += 1
-                values_text = (
-                    format_values(result.function_code, result.values)
-                    if result.values is not None else ""
-                )
-                status = (
-                    Text(result.status, style="red")
-                    if not result.ok else Text(result.status, style="green")
-                )
-                row_key = table.add_row(
-                    str(self._row_counter),
-                    f"0x{result.address:04X}",
-                    str(result.count),
-                    f"0x{result.function_code:02X}",
-                    values_text,
-                    status,
-                )
-                self._results[row_key] = result
+            while True:
+                # In continuous mode each iteration overwrites rows from the top;
+                # in single-shot mode we append after whatever is already in the table.
+                is_continuous = continuous_cb.value
+                row_index = 0 if is_continuous else len(self._row_keys)
+                async for result in scanner.scan(host, port, unit, fc, start, end, count):
+                    self._upsert_row(table, row_index, result)
+                    row_index += 1
+                if not continuous_cb.value:
+                    break
+                await asyncio.sleep(1)
         except asyncio.CancelledError:
             self.notify("Scan stopped", severity="warning")
         except Exception as exc:
@@ -345,3 +344,32 @@ class ModbusScanApp(App):
             self.query_one("#start-btn", Button).disabled = False
             self.query_one("#stop-btn", Button).disabled = True
             self._scan_task = None
+
+    def _upsert_row(self, table: DataTable, row_index: int, result: ScanResult) -> None:
+        values_text = (
+            format_values(result.function_code, result.values)
+            if result.values is not None else ""
+        )
+        status = Text(result.status, style="green" if result.ok else "red")
+        addr_text = f"0x{result.address:04X}"
+        fc_text = f"0x{result.function_code:02X}"
+
+        if row_index < len(self._row_keys):
+            row_key = self._row_keys[row_index]
+            table.update_cell_at(Coordinate(row_index, 1), addr_text)
+            table.update_cell_at(Coordinate(row_index, 2), str(result.count))
+            table.update_cell_at(Coordinate(row_index, 3), fc_text)
+            table.update_cell_at(Coordinate(row_index, 4), values_text)
+            table.update_cell_at(Coordinate(row_index, 5), status)
+            self._results[row_key] = result
+        else:
+            row_key = table.add_row(
+                str(row_index + 1),
+                addr_text,
+                str(result.count),
+                fc_text,
+                values_text,
+                status,
+            )
+            self._row_keys.append(row_key)
+            self._results[row_key] = result
